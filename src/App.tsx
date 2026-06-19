@@ -210,9 +210,29 @@ export default function App() {
             const cachedDB: DatabaseState = JSON.parse(cachedStr);
             if (cachedDB && Array.isArray(cachedDB.subscribers) && cachedDB.subscribers.length > 0) {
               if (fullDB.subscribers.length === 0) {
-                // Server database has been reset! Reveal self-healing restore banner
-                setAdminOfflineCacheCount(cachedDB.subscribers.length);
-                setShowLocalRestoreBanner(true);
+                // Server database has been reset! Let's automatically restore it silently!
+                console.log("Server is empty but we have a populated cache. Triggering silent automatic restoration...");
+                const restoreRes = await fetch("/api/admin/restore-backup", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    password: pwd,
+                    backup: {
+                      days: cachedDB.days,
+                      subscribers: cachedDB.subscribers,
+                      password: pwd
+                    }
+                  })
+                });
+                if (restoreRes.ok) {
+                  setDays(cachedDB.days);
+                  setSubscribers(cachedDB.subscribers);
+                  setShowLocalRestoreBanner(false);
+                  triggerToast("🛡️ تم استرجاع ومزامنة كافة بيانات المارثون وتعديلاتك تلقائياً وبأمان من النسخة الاحتياطية المتصفحية!", "success");
+                } else {
+                  setAdminOfflineCacheCount(cachedDB.subscribers.length);
+                  setShowLocalRestoreBanner(true);
+                }
               } else {
                 // Server is alive and populated. Safeguard local storage with the newest set
                 localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
@@ -233,6 +253,58 @@ export default function App() {
             localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
           }
         }
+      } else if (res.status === 401) {
+        // Wait, did the server restart and revert to default password "123"?
+        // Let's check if we have an admin DB cache in localStorage
+        const cachedStr = localStorage.getItem("proverbs_admin_full_db_cache");
+        if (cachedStr) {
+          try {
+            const cachedDB: DatabaseState = JSON.parse(cachedStr);
+            if (cachedDB) {
+              console.log("Server password check failed. Attempting silent self-healing from local browser cache...");
+              // Try to restore using default password "123"
+              const restoreRes = await fetch("/api/admin/restore-backup", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  password: "123", // The default server password on restart
+                  backup: {
+                    days: cachedDB.days,
+                    subscribers: cachedDB.subscribers,
+                    password: pwd // Restore our custom password!
+                  }
+                })
+              });
+
+              if (restoreRes.ok) {
+                console.log("Database self-healed successfully onto server!");
+                // Now retry fetching the data with our actual custom password!
+                const retryRes = await fetch("/api/admin/data", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ password: pwd })
+                });
+
+                if (retryRes.ok) {
+                  const retryDB: DatabaseState = await retryRes.json();
+                  setDays(retryDB.days);
+                  setSubscribers(retryDB.subscribers);
+                  localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(retryDB));
+                  setShowLocalRestoreBanner(false);
+                  triggerToast("🛡️ تم استرجاع ومزامنة كافة بيانات المارثون وتعديلاتك تلقائياً وبأمان من النسخة الاحتياطية المتصفحية!", "success");
+                  return; // Self-healing complete and successful!
+                }
+              }
+            }
+          } catch (jsonErr) {
+            console.error("Error during silent auto-healing parse", jsonErr);
+          }
+        }
+
+        const err = await res.json();
+        triggerToast(err.error || "فشل التحقق من هوية المشرف", "error");
+        setIsAdminLoggedIn(false);
+        localStorage.removeItem("proverbs_admin_logged");
       } else {
         const err = await res.json();
         triggerToast(err.error || "فشل التحقق من هوية المشرف", "error");
@@ -319,6 +391,18 @@ export default function App() {
     }
   }, [participantName]);
 
+  // Keep the administrator full database cache in sync with local edits
+  useEffect(() => {
+    if (isAdminLoggedIn && adminPassword && Object.keys(days).length > 0) {
+      const stateToCache = {
+        password: adminPassword,
+        days: days,
+        subscribers: subscribers
+      };
+      localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(stateToCache));
+    }
+  }, [days, subscribers, adminPassword, isAdminLoggedIn]);
+
   // Handle Subscriber Entry & Registration
   const handleParticipantSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -390,6 +474,55 @@ export default function App() {
         triggerToast("تم تسجيل دخول المشرف بنجاح!", "success");
         setAdmPasswordInput("");
         setShowAdminLogin(false);
+      } else if (res.status === 401) {
+        // Double check silent self-healing on login in case server restarted!
+        const cachedStr = localStorage.getItem("proverbs_admin_full_db_cache");
+        if (cachedStr) {
+          try {
+            const cachedDB: DatabaseState = JSON.parse(cachedStr);
+            if (cachedDB) {
+              console.log("Login failed. Attempting silent self-healing during login from browser cache...");
+              const restoreRes = await fetch("/api/admin/restore-backup", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  password: "123", // The default server password on restart
+                  backup: {
+                    days: cachedDB.days,
+                    subscribers: cachedDB.subscribers,
+                    password: pwd // The password they typed is restored as the custom password!
+                  }
+                })
+              });
+
+              if (restoreRes.ok) {
+                // Retry login now!
+                const retryRes = await fetch("/api/admin/login", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ password: pwd })
+                });
+
+                if (retryRes.ok) {
+                  setIsAdminLoggedIn(true);
+                  setAdminPassword(pwd);
+                  localStorage.setItem("proverbs_admin_logged", "true");
+                  localStorage.setItem("proverbs_admin_password", pwd);
+                  syncAdminData(pwd);
+                  triggerToast("تمت استعادة كافة تعديلاتك وتأمين السيرفر بنجاح وتسجيل دخولك تلقائياً! 🛡️", "success");
+                  setAdmPasswordInput("");
+                  setShowAdminLogin(false);
+                  return;
+                }
+              }
+            }
+          } catch (jsonErr) {
+            console.error("Error during silent auto-healing on login", jsonErr);
+          }
+        }
+        
+        const err = await res.json();
+        triggerToast(err.error || "الرقم السري للمشرف غير صحيح", "error");
       } else {
         const err = await res.json();
         triggerToast(err.error || "الرقم السري للمشرف غير صحيح", "error");
