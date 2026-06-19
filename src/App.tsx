@@ -203,15 +203,21 @@ export default function App() {
         setDays(fullDB.days);
         setSubscribers(fullDB.subscribers);
 
-        // Check if server is currently empty of subscribers, but we have cached subscribers locally
         const cachedStr = localStorage.getItem("proverbs_admin_full_db_cache");
+        let serverResetIndictator = false;
+
         if (cachedStr) {
           try {
             const cachedDB: DatabaseState = JSON.parse(cachedStr);
-            if (cachedDB && Array.isArray(cachedDB.subscribers) && cachedDB.subscribers.length > 0) {
-              if (fullDB.subscribers.length === 0) {
-                // Server database has been reset! Let's automatically restore it silently!
-                console.log("Server is empty but we have a populated cache. Triggering silent automatic restoration...");
+            if (cachedDB) {
+              // Check if server is currently in default state with NO subscribers, but browser has a non-empty cache or custom password
+              const browserHasSubscribers = Array.isArray(cachedDB.subscribers) && cachedDB.subscribers.length > 0;
+              const browserHasCustomPass = cachedDB.password && cachedDB.password !== "123";
+              const serverIsEmptyOfSubscribers = fullDB.subscribers.length === 0;
+
+              if (serverIsEmptyOfSubscribers && (browserHasSubscribers || browserHasCustomPass)) {
+                serverResetIndictator = true;
+                console.log("Server database has reverted to empty defaults, triggering client-side restore-backup...");
                 const restoreRes = await fetch("/api/admin/restore-backup", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -230,28 +236,20 @@ export default function App() {
                   setShowLocalRestoreBanner(false);
                   triggerToast("🛡️ تم استرجاع ومزامنة كافة بيانات المارثون وتعديلاتك تلقائياً وبأمان من النسخة الاحتياطية المتصفحية!", "success");
                 } else {
-                  setAdminOfflineCacheCount(cachedDB.subscribers.length);
+                  setAdminOfflineCacheCount(browserHasSubscribers ? cachedDB.subscribers.length : 1);
                   setShowLocalRestoreBanner(true);
                 }
-              } else {
-                // Server is alive and populated. Safeguard local storage with the newest set
-                localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
-                setShowLocalRestoreBanner(false);
-              }
-            } else {
-              // No cached subscribers, or cache empty. Update cache
-              if (fullDB.subscribers.length > 0) {
-                localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
               }
             }
           } catch (jsonErr) {
-            console.error("Error reading admin DB cache", jsonErr);
+            console.error("Error reading admin DB cache during success sync", jsonErr);
           }
-        } else {
-          // No cache found. Write initial cache if we have subscribers
-          if (fullDB.subscribers.length > 0) {
-            localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
-          }
+        }
+
+        // If the server was not reset (or was restored successfully), it's safe to update the browser cache
+        if (!serverResetIndictator) {
+          localStorage.setItem("proverbs_admin_full_db_cache", JSON.stringify(fullDB));
+          setShowLocalRestoreBanner(false);
         }
       } else if (res.status === 401) {
         // Wait, did the server restart and revert to default password "123"?
@@ -529,6 +527,30 @@ export default function App() {
       }
     } catch (e) {
       triggerToast("حدث عطل في الاتصال بخادم المشرفين", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle Force Resetting Password to Default "123"
+  const handleForceResetPassword = async () => {
+    if (!window.confirm("هل أنت متأكد من رغبتك في إعادة تعيين الرقم السري للمشرف إلى القيمة الافتراضية '123'؟")) {
+      return;
+    }
+    try {
+      setLoading(true);
+      const res = await fetch("/api/admin/force-reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (res.ok) {
+        triggerToast("تمت إعادة تعيين الرقم السري للمشرف إلى 123 بنجاح! يمكنك استخدامه الآن للدخول.", "success");
+        setAdmPasswordInput("123");
+      } else {
+        triggerToast("فشل إعادة تعيين الرقم السري", "error");
+      }
+    } catch (err) {
+      triggerToast("عطل اتصال بالملقم أثناء إعادة التعيين", "error");
     } finally {
       setLoading(false);
     }
@@ -1298,6 +1320,15 @@ export default function App() {
                       >
                         <ShieldAlert className="w-4 h-4" />
                         <span>تحقق ودخول</span>
+                      </button>
+                    </div>
+                    <div className="text-center pt-2">
+                      <button
+                        type="button"
+                        onClick={handleForceResetPassword}
+                        className="text-xs text-amber-700 hover:text-rose-600 font-bold underline transition inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        ⚠️ نسيت كلمة المرور؟ اضغط هنا لإعادة تعيين الرقم السري للمشرف فوراً إلى (123)
                       </button>
                     </div>
                   </form>

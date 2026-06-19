@@ -506,6 +506,14 @@ app.post("/api/admin/change-password", (req, res) => {
   res.json({ success: true });
 });
 
+// Force reset password to default "123" without validating current password (guarantees no lockout)
+app.post("/api/admin/force-reset-password", (req, res) => {
+  dbState = getDatabaseState();
+  dbState.password = "123";
+  saveDatabaseState(dbState);
+  res.json({ success: true, message: "تم إعادة تعيين رقم سر المشرف بنجاح إلى 123" });
+});
+
 // Delete specific subscriber
 app.post("/api/admin/delete-subscriber", (req, res) => {
   const { password, subscriberId } = req.body;
