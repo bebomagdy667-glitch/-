@@ -1,0 +1,6 @@
+{
+  "name": "مارثون سفر الأمثال",
+  "description": "مارثون الكتاب المقدس لسفر الأمثال - كنيسة ماريوحنا المعمدان واخنوخ البار وايليا النبى - اجتماع الثلاث فتيه القديسين",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
