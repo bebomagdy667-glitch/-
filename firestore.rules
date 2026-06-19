@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Restrict client-side access. Complete isolation.
+    // Our secure Express server has server-side Admin privilege, bypassing rules to sync data.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

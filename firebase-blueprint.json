@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "AdminSettings": {
+      "title": "Admin Settings",
+      "description": "Global administrator configurations like access password",
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "string",
+          "description": "The current admin access password"
+        }
+      },
+      "required": ["password"]
+    },
+    "Day": {
+      "title": "Marathon Day",
+      "description": "Represents a single day of the marathon with chapter verses, state, and questions",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "The index/number of the marathon day"
+        },
+        "chapter": {
+          "type": "string",
+          "description": "The name or reference of the bible chapter"
+        },
+        "verses": {
+          "type": "array",
+          "description": "A list of reference verses for the day"
+        },
+        "questions": {
+          "type": "array",
+          "description": "Three questions with choices and answer indices"
+        },
+        "isOpen": {
+          "type": "boolean",
+          "description": "True if users can submit answers for this day"
+        }
+      },
+      "required": ["id", "chapter", "verses", "questions", "isOpen"]
+    },
+    "Subscriber": {
+      "title": "Marathon Subscriber",
+      "description": "A participant in the scripture reading marathon",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique subscriber ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Subscriber's full Arabic name"
+        },
+        "registeredAt": {
+          "type": "string",
+          "description": "Timestamp when subscriber registered"
+        },
+        "solvedDays": {
+          "type": "object",
+          "description": "Mapping from dayId string to their answers, score, and timestamps"
+        }
+      },
+      "required": ["id", "name", "registeredAt"]
+    }
+  },
+  "firestore": {
+    "/settings/admin": {
+      "schema": "AdminSettings",
+      "description": "Global settings for admin panel"
+    },
+    "/days/{dayId}": {
+      "schema": "Day",
+      "description": "Day question and verses metadata"
+    },
+    "/subscribers/{subscriberId}": {
+      "schema": "Subscriber",
+      "description": "Subscribed users records and answer tracking sheet"
+    }
+  }
+}

@@ -534,20 +534,27 @@ export default function App() {
 
   // Handle Force Resetting Password to Default "123"
   const handleForceResetPassword = async () => {
-    if (!window.confirm("هل أنت متأكد من رغبتك في إعادة تعيين الرقم السري للمشرف إلى القيمة الافتراضية '123'؟")) {
+    const key = window.prompt("⚠️ لإعادة التعيين، يرجى إدخال مفتاح الاستعادة السري (Recovery Key) الخاص بالمطور/المشرف لمنع تسلل غير المخولين:");
+    if (key === null) return; // User canceled the dialog
+    
+    if (!key.trim()) {
+      triggerToast("مفتاح الاستعادة السري مطلوب لإعادة تعيين الرقم السري!", "error");
       return;
     }
+
     try {
       setLoading(true);
       const res = await fetch("/api/admin/force-reset-password", {
         method: "POST",
-        headers: { "Content-Type": "application/json" }
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recoveryKey: key.trim() })
       });
       if (res.ok) {
-        triggerToast("تمت إعادة تعيين الرقم السري للمشرف إلى 123 بنجاح! يمكنك استخدامه الآن للدخول.", "success");
+        triggerToast("تمت إعادة تعيين الرقم السري للمشرف إلى 123 بنجاح! يمكنك استخدامه الآن للدخول بأمان.", "success");
         setAdmPasswordInput("123");
       } else {
-        triggerToast("فشل إعادة تعيين الرقم السري", "error");
+        const errData = await res.json();
+        triggerToast(errData.error || "مفتاح الاستعادة المدخل غير صحيح! يرجى الاستعانة بالمطور.", "error");
       }
     } catch (err) {
       triggerToast("عطل اتصال بالملقم أثناء إعادة التعيين", "error");

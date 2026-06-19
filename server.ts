@@ -9,6 +9,8 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { fileURLToPath } from "url";
 import { DatabaseState, DayData, Subscriber } from "./src/types";
+import { initializeApp } from "firebase-admin/app";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
 
 const __filename = typeof import.meta?.url === "string" ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -16,6 +18,140 @@ const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 const app = express();
 const PORT = 3000;
 const DB_PATH = path.join(process.cwd(), "db.json");
+
+// Initialize Firebase Admin with custom database ID from config
+let db: Firestore | null = null;
+try {
+  const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(firebaseConfigPath)) {
+    const config = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
+    const firebaseApp = initializeApp({
+      projectId: config.projectId
+    });
+    
+    if (config.firestoreDatabaseId && config.firestoreDatabaseId !== "(default)") {
+      db = getFirestore(firebaseApp, config.firestoreDatabaseId);
+    } else {
+      db = getFirestore(firebaseApp);
+    }
+    console.log("Firebase Admin initialized successfully with database: " + (config.firestoreDatabaseId || "(default)"));
+  } else {
+    console.warn("firebase-applet-config.json not found, Firestore sync disabled.");
+  }
+} catch (err) {
+  console.error("Failed to initialize Firebase Admin:", err);
+}
+
+// Loads full configuration state from Firestore
+async function loadDatabaseFromFirestore(): Promise<DatabaseState | null> {
+  if (!db) return null;
+  try {
+    console.log("Loading marathon database state from Firestore...");
+    
+    // 1. Load Admin settings (password)
+    let password = "123";
+    const settingsDoc = await db.collection("settings").doc("admin").get();
+    if (settingsDoc.exists) {
+      password = settingsDoc.data()?.password || "123";
+    }
+
+    // 2. Load Days
+    const days: { [key: number]: DayData } = {};
+    const daysSnapshot = await db.collection("days").get();
+    daysSnapshot.forEach((doc) => {
+      const dayId = parseInt(doc.id);
+      if (!isNaN(dayId)) {
+        days[dayId] = doc.data() as DayData;
+      }
+    });
+
+    // 3. Load Subscribers
+    const subscribers: Subscriber[] = [];
+    const subscribersSnapshot = await db.collection("subscribers").get();
+    subscribersSnapshot.forEach((doc) => {
+      subscribers.push(doc.data() as Subscriber);
+    });
+
+    if (Object.keys(days).length === 0) {
+      console.log("Firestore days collection is empty (fresh project).");
+      return null;
+    }
+
+    console.log(`Loaded from Firestore! Pasword length: ${password.length}, Days: ${Object.keys(days).length}, Subscribers: ${subscribers.length}`);
+    return {
+      password,
+      days,
+      subscribers
+    };
+  } catch (err) {
+    console.error("Failed to load state from Firestore:", err);
+    return null;
+  }
+}
+
+// Syncs state to Firestore (highly robust, uses batched writes up to limit)
+async function syncToFirestore(state: DatabaseState) {
+  if (!db) return;
+  try {
+    console.log("Syncing marathon database state back to Firestore...");
+
+    // A. Sync admin credentials
+    await db.collection("settings").doc("admin").set({ password: state.password }, { merge: true });
+
+    // B. Sync days questions & details (in batches of 500 max)
+    let dayBatch = db.batch();
+    let dCount = 0;
+    for (const dayId in state.days) {
+      const day = state.days[dayId];
+      if (day) {
+        const dayRef = db.collection("days").doc(dayId.toString());
+        dayBatch.set(dayRef, day);
+        dCount++;
+        if (dCount >= 400) {
+          await dayBatch.commit();
+          dayBatch = db.batch();
+          dCount = 0;
+        }
+      }
+    }
+    if (dCount > 0) {
+      await dayBatch.commit();
+    }
+
+    // C. Remove deleted subscribers from firestore to keep true sync
+    const localSubscriberIds = new Set(state.subscribers.map(s => s.id));
+    const remoteRefs = await db.collection("subscribers").listDocuments();
+    for (const ref of remoteRefs) {
+      if (!localSubscriberIds.has(ref.id)) {
+        console.log(`Deleting removed subscriber ${ref.id} from Firestore Database...`);
+        await ref.delete();
+      }
+    }
+
+    // D. Sync subscribers profiles (in batches of 500 max)
+    let subBatch = db.batch();
+    let sCount = 0;
+    for (const sub of state.subscribers) {
+      if (sub && sub.id) {
+        const subRef = db.collection("subscribers").doc(sub.id);
+        subBatch.set(subRef, sub);
+        sCount++;
+        if (sCount >= 400) {
+          await subBatch.commit();
+          subBatch = db.batch();
+          sCount = 0;
+        }
+      }
+    }
+    if (sCount > 0) {
+      await subBatch.commit();
+    }
+
+    console.log("Firestore background sync completed perfectly!");
+  } catch (err) {
+    console.error("Error committing background sync to Firestore:", err);
+  }
+}
 
 app.use(express.json({ limit: "50mb" }));
 
@@ -228,7 +364,62 @@ function getDatabaseState(): DatabaseState {
       return defaultState;
     }
     const data = fs.readFileSync(DB_PATH, "utf-8");
-    return JSON.parse(data);
+    const parsed: DatabaseState = JSON.parse(data);
+
+    let repaired = false;
+
+    // 1. Repair missing correctIndex for questions in all days
+    if (parsed && parsed.days) {
+      for (const dayId in parsed.days) {
+        const day = parsed.days[dayId];
+        if (day && Array.isArray(day.questions)) {
+          day.questions.forEach((q) => {
+            if (typeof q.correctIndex !== "number") {
+              q.correctIndex = 0; // Default to first option as specified in default questions
+              repaired = true;
+            }
+          });
+        }
+      }
+    }
+
+    // 2. Repair subscribers solvedDays score based on corrected correctIndex
+    if (parsed && Array.isArray(parsed.subscribers)) {
+      parsed.subscribers.forEach((sub) => {
+        if (sub && sub.solvedDays) {
+          for (const dIdStr in sub.solvedDays) {
+            const dId = parseInt(dIdStr);
+            const userDayResult = sub.solvedDays[dId];
+            const day = parsed.days?.[dId];
+            if (userDayResult && day && Array.isArray(day.questions)) {
+              let correctCount = 0;
+              day.questions.forEach((q, idx) => {
+                if (q.correctIndex === userDayResult.answers[idx]) {
+                  correctCount++;
+                }
+              });
+              if (userDayResult.score !== correctCount) {
+                console.log(`Self-healing stats for subscriber ${sub.name}: day ${dId} score corrected from ${userDayResult.score} to ${correctCount}`);
+                userDayResult.score = correctCount;
+                repaired = true;
+              }
+              const targetCorrectAnswers = day.questions.map(q => q.correctIndex);
+              if (!userDayResult.correctAnswers || JSON.stringify(userDayResult.correctAnswers) !== JSON.stringify(targetCorrectAnswers)) {
+                userDayResult.correctAnswers = targetCorrectAnswers;
+                repaired = true;
+              }
+            }
+          }
+        }
+      });
+    }
+
+    if (repaired) {
+      console.log("Database successfully self-healed and saved back to JSON!");
+      fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2), "utf-8");
+    }
+
+    return parsed;
   } catch (err) {
     console.error("Error reading database file, resetting to default:", err);
     return generateDefaultDatabase();
@@ -238,6 +429,11 @@ function getDatabaseState(): DatabaseState {
 function saveDatabaseState(state: DatabaseState) {
   try {
     fs.writeFileSync(DB_PATH, JSON.stringify(state, null, 2), "utf-8");
+    if (db) {
+      syncToFirestore(state).catch((err) => {
+        console.error("Firestore background sync failed during saveState:", err);
+      });
+    }
   } catch (err) {
     console.error("Error saving database file:", err);
   }
@@ -506,8 +702,15 @@ app.post("/api/admin/change-password", (req, res) => {
   res.json({ success: true });
 });
 
-// Force reset password to default "123" without validating current password (guarantees no lockout)
+// Force reset password to default "123" if the correct recovery key is provided (guarantees no lockout for genuine admin)
 app.post("/api/admin/force-reset-password", (req, res) => {
+  const { recoveryKey } = req.body;
+  const expectedKey = process.env.ADMIN_RECOVERY_KEY || "recovery2026marathon";
+
+  if (!recoveryKey || recoveryKey.trim() !== expectedKey.trim()) {
+    return res.status(401).json({ error: "مفتاح الاستعادة السري غير صحيح. لا يمكن إعادة تعيين الرقم السري." });
+  }
+
   dbState = getDatabaseState();
   dbState.password = "123";
   saveDatabaseState(dbState);
@@ -560,6 +763,26 @@ app.post("/api/admin/restore-backup", (req, res) => {
 
 // 3. Integrated Vite setup (handles assets and single page layout client-side)
 async function startServer() {
+  // Sync state from Firestore at startup (Ensures durability across scale downs/restarts)
+  if (db) {
+    try {
+      const firestoreState = await loadDatabaseFromFirestore();
+      if (firestoreState) {
+        dbState = firestoreState;
+        fs.writeFileSync(DB_PATH, JSON.stringify(dbState, null, 2), "utf-8");
+        console.log("Database state successfully synchronized from Firestore on startup!");
+      } else {
+        // If Firestore is empty but we have local backup/data, initialize Firestore with it
+        if (dbState && Object.keys(dbState.days).length > 0) {
+          console.log("Firestore database is empty but local db.json contains data. Performing initial cloud setup...");
+          await syncToFirestore(dbState);
+        }
+      }
+    } catch (fsErr) {
+      console.error("Failed to sync/initialize databases at startup:", fsErr);
+    }
+  }
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
